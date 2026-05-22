@@ -1,0 +1,9 @@
+{
+  "title": "Microsoft Lens",
+  "description": "3.8B foundational text-to-image model by Microsoft — Lens and Lens-Turbo variants",
+  "icon": "icon.jpeg",
+  "posts": [
+    "https://github.com/microsoft/Lens",
+    "https://huggingface.co/microsoft/Lens"
+  ]
+}

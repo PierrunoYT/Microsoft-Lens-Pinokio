@@ -1,0 +1,15 @@
+# Pinokio: Lens Python deps without torch (installed via torch.js).
+# Sync from: https://github.com/microsoft/Lens/blob/main/requirements.txt
+
+accelerate==1.13.0
+diffusers==0.38.0
+einops==0.8.2
+huggingface_hub==1.14.0
+numpy==2.4.3
+pillow>=12.2.0
+safetensors>=0.7.0
+tokenizers==0.22.2
+tqdm==4.67.3
+transformers==5.8.0
+kernels==0.14.0
+gradio>=5.7.0
