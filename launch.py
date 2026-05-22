@@ -183,7 +183,7 @@ def main() -> None:
     #col-container { max-width: 1100px; margin: 0 auto; }
     """
 
-    with gr.Blocks(css=css, title="Microsoft Lens") as demo:
+    with gr.Blocks(title="Microsoft Lens") as demo:
         with gr.Column(elem_id="col-container"):
             gr.Markdown(
                 f"""
@@ -247,7 +247,7 @@ def main() -> None:
         server_port=port,
         share=os.environ.get("GRADIO_SHARE", "0") == "1",
         ssr_mode=False,
-        show_api=False,
+        css=css,
     )
 
 
