@@ -6,10 +6,12 @@ import gc
 import os
 import random
 import sys
+import time
 
 import gradio as gr
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import list_repo_files, hf_hub_download, snapshot_download
+from huggingface_hub import utils as hf_utils
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.join(ROOT_DIR, "app")
@@ -55,9 +57,25 @@ _local_cache: dict[str, str] = {}
 
 def _ensure_cached(repo: str) -> str:
     if repo not in _local_cache:
-        print(f"\nDownloading {repo} — files will show speed and progress below:")
-        _local_cache[repo] = snapshot_download(repo_id=repo)
-        print(f"Finished downloading {repo}.\n")
+        hf_utils.disable_progress_bars()
+        try:
+            files = list(list_repo_files(repo_id=repo))
+            total = len(files)
+            print(f"\nDownloading {repo} ({total} files):", flush=True)
+            for i, filename in enumerate(files, 1):
+                print(f"  [{i}/{total}] {filename}", flush=True)
+                t0 = time.time()
+                local_file = hf_hub_download(repo_id=repo, filename=filename)
+                elapsed = time.time() - t0
+                size_mb = os.path.getsize(local_file) / (1024 ** 2)
+                if elapsed > 0.5:
+                    print(f"         -> {size_mb:.0f} MB  {size_mb / elapsed:.1f} MB/s", flush=True)
+                else:
+                    print(f"         -> {size_mb:.0f} MB  (cached)", flush=True)
+            _local_cache[repo] = snapshot_download(repo_id=repo, local_files_only=True)
+            print(f"All files ready.\n", flush=True)
+        finally:
+            hf_utils.enable_progress_bars()
     return _local_cache[repo]
 
 
