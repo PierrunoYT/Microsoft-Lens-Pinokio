@@ -45,9 +45,11 @@ def _low_vram_enabled() -> bool:
         return True
     try:
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        return vram_gb < 20
+        # Text encoder (~13 GB) + transformer (~16 GB) = ~29 GB weights alone.
+        # CPU offload unless the user has 48 GB+ VRAM.
+        return vram_gb < 48
     except Exception:
-        return False
+        return True
 
 
 LOW_VRAM = _low_vram_enabled()
