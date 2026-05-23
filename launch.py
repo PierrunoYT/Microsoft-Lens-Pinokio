@@ -9,6 +9,7 @@ import sys
 
 import gradio as gr
 import torch
+from huggingface_hub import snapshot_download
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.join(ROOT_DIR, "app")
@@ -49,6 +50,15 @@ MODEL_CHOICES = {
 _text_encoder = None
 _pipes: dict[str, LensPipeline] = {}
 _active_repo: str | None = None
+_local_cache: dict[str, str] = {}
+
+
+def _ensure_cached(repo: str) -> str:
+    if repo not in _local_cache:
+        print(f"\nDownloading {repo} — files will show speed and progress below:")
+        _local_cache[repo] = snapshot_download(repo_id=repo)
+        print(f"Finished downloading {repo}.\n")
+    return _local_cache[repo]
 
 
 def _should_disable_mxfp4() -> bool:
@@ -80,8 +90,9 @@ def _get_text_encoder():
         pass
 
     repo = TURBO_REPO if LOW_VRAM else LENS_REPO
-    print(f"Loading GPT-OSS text encoder from {repo} (disable_mxfp4={disable_mxfp4})...")
-    _text_encoder = LensGptOssEncoder.from_pretrained(repo, disable_mmap=True, **kwargs)
+    local_path = _ensure_cached(repo)
+    print(f"Loading GPT-OSS text encoder from cache (disable_mxfp4={disable_mxfp4})...")
+    _text_encoder = LensGptOssEncoder.from_pretrained(local_path, disable_mmap=True, **kwargs)
     return _text_encoder
 
 
@@ -109,9 +120,10 @@ def _get_pipe(model_name: str) -> LensPipeline:
     if LOW_VRAM:
         _unload_pipes()
 
-    print(f"Loading Lens pipeline from {repo}...")
+    local_path = _ensure_cached(repo)
+    print(f"Loading Lens pipeline from cache...")
     pipe = LensPipeline.from_pretrained(
-        repo,
+        local_path,
         text_encoder=_get_text_encoder(),
         torch_dtype=DTYPE,
         disable_mmap=True,
