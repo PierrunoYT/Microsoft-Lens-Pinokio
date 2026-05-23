@@ -247,14 +247,27 @@ def generate(
         if reasoner_model_id.strip():
             call_kwargs["api_model"] = reasoner_model_id.strip()
 
-    out = pipe(**call_kwargs)
+    try:
+        out = pipe(**call_kwargs)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        gc.collect()
+        raise gr.Error(
+            "CUDA out of memory. Try enabling CPU offload, reducing the number of images, "
+            "or switching to a lower-step model in the Hardware settings."
+        )
+    except Exception as exc:
+        raise gr.Error(f"Generation failed: {exc}") from exc
     return out.images, seed
 
 
 def do_reload(model_name, dtype_label, use_mxfp4, cpu_offload):
     _unload_all()
     dtype = DTYPE_MAP.get(dtype_label, torch.bfloat16)
-    _get_pipe(model_name, dtype, use_mxfp4, cpu_offload)
+    try:
+        _get_pipe(model_name, dtype, use_mxfp4, cpu_offload)
+    except Exception as exc:
+        return gr.update(value=f"Reload failed: {exc}", visible=True)
     return gr.update(value="Model reloaded successfully.", visible=True)
 
 # ── UI ────────────────────────────────────────────────────────────────────────
