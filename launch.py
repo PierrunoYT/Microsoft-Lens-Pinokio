@@ -81,7 +81,7 @@ def _get_text_encoder():
 
     repo = TURBO_REPO if LOW_VRAM else LENS_REPO
     print(f"Loading GPT-OSS text encoder from {repo} (disable_mxfp4={disable_mxfp4})...")
-    _text_encoder = LensGptOssEncoder.from_pretrained(repo, **kwargs)
+    _text_encoder = LensGptOssEncoder.from_pretrained(repo, disable_mmap=True, **kwargs)
     return _text_encoder
 
 
@@ -114,6 +114,7 @@ def _get_pipe(model_name: str) -> LensPipeline:
         repo,
         text_encoder=_get_text_encoder(),
         torch_dtype=DTYPE,
+        disable_mmap=True,
     )
     if LOW_VRAM or os.environ.get("LENS_OFFLOAD", "").strip() in ("1", "true", "yes"):
         pipe.enable_model_cpu_offload()
