@@ -1,4 +1,4 @@
-"""Pinokio Gradio UI for Microsoft Lens text-to-image."""
+"""Pinokio launcher for Microsoft Lens and Lens-Turbo text-to-image."""
 
 from __future__ import annotations
 
@@ -26,6 +26,14 @@ TURBO_REPO = os.environ.get("LENS_TURBO_REPO", "microsoft/Lens-Turbo")
 LENS_REPO = os.environ.get("LENS_REPO", "microsoft/Lens")
 MAX_SEED = 2**31 - 1
 
+MODEL_CHOICES = ["Lens-Turbo (4 steps)", "Lens (20 steps, RL)"]
+
+
+def model_defaults(model_name: str) -> tuple[int, float]:
+    if "Turbo" in model_name:
+        return 4, 1.0
+    return 20, 5.0
+
 
 def _low_vram_enabled() -> bool:
     override = os.environ.get("LENS_LOW_VRAM", "").strip().lower()
@@ -44,16 +52,9 @@ def _low_vram_enabled() -> bool:
 
 LOW_VRAM = _low_vram_enabled()
 
-MODEL_CHOICES = {
-    "Lens-Turbo (4 steps, fast)": (TURBO_REPO, 4, 1.0),
-    "Lens (20 steps, RL quality)": (LENS_REPO, 20, 5.0),
-}
-
 _text_encoder = None
 _pipes: dict[str, LensPipeline] = {}
-_active_repo: str | None = None
 _local_cache: dict[str, str] = {}
-
 
 _SKIP_PREFIXES = ("assets/", "README", ".git")
 
@@ -106,48 +107,43 @@ def _get_text_encoder():
     if _text_encoder is not None:
         return _text_encoder
 
-    kwargs = {"subfolder": "text_encoder", "dtype": DTYPE}
+    kwargs: dict = {"subfolder": "text_encoder", "dtype": DTYPE}
     disable_mxfp4 = _should_disable_mxfp4()
     try:
         from transformers import Mxfp4Config
-
         kwargs["quantization_config"] = Mxfp4Config(dequantize=disable_mxfp4)
     except ImportError:
         pass
 
     repo = TURBO_REPO if LOW_VRAM else LENS_REPO
     local_path = _ensure_cached(repo)
-    print(f"Loading GPT-OSS text encoder from cache (disable_mxfp4={disable_mxfp4})...")
+    print(f"Loading GPT-OSS text encoder from cache (disable_mxfp4={disable_mxfp4})...", flush=True)
     _text_encoder = LensGptOssEncoder.from_pretrained(local_path, disable_mmap=True, **kwargs)
     return _text_encoder
 
 
 def _unload_pipes(keep_repo: str | None = None) -> None:
-    global _active_repo
-    for repo, pipe in list(_pipes.items()):
+    for repo in list(_pipes.keys()):
         if keep_repo is not None and repo == keep_repo:
             continue
         del _pipes[repo]
     if keep_repo is None:
         _pipes.clear()
-        _active_repo = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
 
 
 def _get_pipe(model_name: str) -> LensPipeline:
-    global _active_repo
-    repo, _steps, _cfg = MODEL_CHOICES[model_name]
+    repo = TURBO_REPO if "Turbo" in model_name else LENS_REPO
     if repo in _pipes:
-        _active_repo = repo
         return _pipes[repo]
 
     if LOW_VRAM:
         _unload_pipes()
 
     local_path = _ensure_cached(repo)
-    print(f"Loading Lens pipeline from cache...")
+    print(f"Loading {model_name} from cache...", flush=True)
     pipe = LensPipeline.from_pretrained(
         local_path,
         text_encoder=_get_text_encoder(),
@@ -160,13 +156,12 @@ def _get_pipe(model_name: str) -> LensPipeline:
         pipe.to("cuda")
 
     _pipes[repo] = pipe
-    _active_repo = repo
     return pipe
 
 
 def generate(
     prompt: str,
-    model_name: str = list(MODEL_CHOICES.keys())[0],
+    model_name: str = MODEL_CHOICES[0],
     base_resolution: int = 1024,
     aspect_ratio: str = "1:1",
     steps: int | None = None,
@@ -178,15 +173,14 @@ def generate(
     if not prompt or not prompt.strip():
         raise gr.Error("Please enter a prompt.")
 
-    _repo, default_steps, default_cfg = MODEL_CHOICES[model_name]
+    pipe = _get_pipe(model_name)
+    default_steps, default_cfg = model_defaults(model_name)
     steps = default_steps if steps is None else int(steps)
     cfg = default_cfg if cfg is None else float(cfg)
 
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
     seed = int(seed)
-
-    pipe = _get_pipe(model_name)
     generator = torch.Generator(device=pipe._execution_device).manual_seed(seed)
 
     out = pipe(
@@ -201,9 +195,9 @@ def generate(
     return out.images[0], seed
 
 
-def _sync_defaults(model_name):
-    _repo, steps, cfg = MODEL_CHOICES[model_name]
-    return gr.update(value=steps), gr.update(value=cfg)
+CSS = """
+#col-container { max-width: 1100px; margin: 0 auto; }
+"""
 
 
 def main() -> None:
@@ -216,23 +210,17 @@ def main() -> None:
 
     port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
     mode = "Low VRAM (CPU offload)" if LOW_VRAM else "Standard"
-    print(f"Lens Pinokio launcher — {mode}")
+    print(f"Lens Pinokio launcher — {mode}", flush=True)
 
-    css = """
-    #col-container { max-width: 1100px; margin: 0 auto; }
-    """
-
-    with gr.Blocks(title="Microsoft Lens") as demo:
+    with gr.Blocks(theme=gr.themes.Citrus(), css=CSS, title="Microsoft Lens") as demo:
         with gr.Column(elem_id="col-container"):
             gr.Markdown(
                 f"""
                 # Microsoft Lens
-                3.8B text-to-image model by Microsoft. **{mode}**
+                3.8B foundational text-to-image model by Microsoft. **{mode}** — switch between
+                **Lens-Turbo** (4-step distilled, fast) and **Lens** (20-step RL-tuned, higher quality).
 
-                [Paper](https://arxiv.org/abs/2605.21573) ·
-                [Code](https://github.com/microsoft/Lens) ·
-                [Lens](https://huggingface.co/microsoft/Lens) ·
-                [Lens-Turbo](https://huggingface.co/microsoft/Lens-Turbo)
+                [Paper](https://arxiv.org/abs/2605.21573) · [Code](https://github.com/microsoft/Lens) · [Lens](https://huggingface.co/microsoft/Lens) · [Lens-Turbo](https://huggingface.co/microsoft/Lens-Turbo)
                 """
             )
 
@@ -240,16 +228,16 @@ def main() -> None:
                 with gr.Column(scale=3):
                     prompt = gr.Textbox(
                         label="Prompt",
-                        placeholder="A cinematic mountain lake at sunrise, soft golden light, mist on the water",
+                        placeholder="A cinematic mountain lake at sunrise, soft golden light, mist rising off the water",
                         lines=3,
                     )
                     with gr.Row():
                         model = gr.Radio(
-                            choices=list(MODEL_CHOICES.keys()),
-                            value=list(MODEL_CHOICES.keys())[0],
+                            choices=MODEL_CHOICES,
+                            value=MODEL_CHOICES[0],
                             label="Model",
                         )
-                        run_btn = gr.Button("Generate", variant="primary")
+                    run_btn = gr.Button("Generate", variant="primary")
 
                     with gr.Accordion("Advanced", open=False):
                         with gr.Row():
@@ -274,19 +262,35 @@ def main() -> None:
                     image = gr.Image(label="Output", type="pil", height=640)
                     used_seed = gr.Number(label="Seed used", interactive=False)
 
-            model.change(_sync_defaults, inputs=model, outputs=[steps, cfg])
+            gr.Examples(
+                examples=[
+                    ["A generous portion of classic British fish and chips on white paper, golden crispy beer-battered cod, thick-cut chips, lemon wedge, mushy peas, wooden pub table, overhead shot", MODEL_CHOICES[0]],
+                    ["A crystal dragon soaring through an aurora borealis sky, transparent faceted body refracting green and purple light, ice trail from its wings, high fantasy digital art", MODEL_CHOICES[0]],
+                    ["Aerial view of Yuanyang rice terraces at sunrise, cascading water-filled paddies reflecting pink sky, morning mist between layers, drone photography", MODEL_CHOICES[1]],
+                    ["A green iguana basking on a moss-covered log in a tropical rainforest, every scale rendered sharply, dewdrops on its skin, National Geographic style", MODEL_CHOICES[1]],
+                ],
+                inputs=[prompt, model],
+                outputs=[image, used_seed],
+                fn=generate,
+                cache_examples=False,
+            )
 
-            inputs = [prompt, model, base_res, aspect, steps, cfg, seed, randomize]
-            outputs = [image, used_seed]
-            run_btn.click(generate, inputs=inputs, outputs=outputs)
-            prompt.submit(generate, inputs=inputs, outputs=outputs)
+        def _sync_defaults(model_name):
+            s, g = model_defaults(model_name)
+            return gr.update(value=s), gr.update(value=g)
+
+        model.change(_sync_defaults, inputs=model, outputs=[steps, cfg])
+
+        inputs = [prompt, model, base_res, aspect, steps, cfg, seed, randomize]
+        outputs = [image, used_seed]
+        run_btn.click(generate, inputs=inputs, outputs=outputs)
+        prompt.submit(generate, inputs=inputs, outputs=outputs)
 
     demo.queue(max_size=4 if LOW_VRAM else 8).launch(
         server_name="127.0.0.1",
         server_port=port,
         share=os.environ.get("GRADIO_SHARE", "0") == "1",
         ssr_mode=False,
-        css=css,
     )
 
 
