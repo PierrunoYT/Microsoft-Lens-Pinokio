@@ -10,6 +10,18 @@ module.exports = {
       next: null
     },
     {
+      when: "{{!gpus.includes('nvidia')}}",
+      method: "notify",
+      params: { html: "Lens requires an NVIDIA GPU with CUDA." },
+      next: null
+    },
+    {
+      when: "{{!exists('app/.installed') || !exists('app/env')}}",
+      method: "notify",
+      params: { html: "Run Install successfully before starting Lens." },
+      next: null
+    },
+    {
       method: "shell.run",
       params: {
         venv: "env",

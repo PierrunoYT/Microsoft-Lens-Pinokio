@@ -65,13 +65,9 @@ def _default_cpu_offload() -> bool:
     return _vram_gb() < 48
 
 def _default_mxfp4() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    try:
-        major, _ = torch.cuda.get_device_capability()
-        return major >= 9  # Hopper+ (H100/H200) natively supports MXFP4
-    except Exception:
-        return False
+    # GPU capability alone does not guarantee compatible Triton kernels.
+    # The baseline installation uses dequantization on both supported OSes.
+    return False
 
 VRAM = _vram_gb()
 GPU_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU detected"
@@ -130,7 +126,7 @@ def _get_text_encoder(dtype: torch.dtype, use_mxfp4: bool) -> LensGptOssEncoder:
     kwargs: dict = {"subfolder": "text_encoder", "dtype": dtype}
     try:
         from transformers import Mxfp4Config
-        # dequantize=True on pre-Hopper GPUs that lack native MXFP4 kernels
+        # Dequantize unless the user explicitly opts into MXFP4 kernels.
         kwargs["quantization_config"] = Mxfp4Config(dequantize=not use_mxfp4)
     except ImportError:
         pass
@@ -138,7 +134,7 @@ def _get_text_encoder(dtype: torch.dtype, use_mxfp4: bool) -> LensGptOssEncoder:
     # Both repos share the same text encoder; use Turbo (smaller download)
     repo = REPOS["Lens-Turbo (4 steps, fast)"]
     local_path = _ensure_cached(repo)
-    mxfp4_label = "native" if use_mxfp4 else "dequantized"
+    mxfp4_label = "quantized" if use_mxfp4 else "dequantized"
     print(f"Loading text encoder [{dtype} / mxfp4={mxfp4_label}]...", flush=True)
     _text_encoder = LensGptOssEncoder.from_pretrained(local_path, disable_mmap=True, **kwargs)
     _loaded_dtype = dtype
@@ -274,7 +270,7 @@ def main() -> None:
     port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
     print(f"GPU: {GPU_NAME} ({VRAM:.1f} GB) — CPU offload default: {_default_cpu_offload()}", flush=True)
 
-    with gr.Blocks(theme=gr.themes.Citrus(), css=CSS, title="Microsoft Lens") as demo:
+    with gr.Blocks(title="Microsoft Lens") as demo:
         with gr.Column(elem_id="col-container"):
 
             gr.Markdown(f"""
@@ -362,7 +358,7 @@ def main() -> None:
                         use_mxfp4 = gr.Checkbox(
                             value=_default_mxfp4(),
                             label="MXFP4 quantization (text encoder)",
-                            info="Native on Hopper+ (H100/H200). Saves ~10 GB. May reduce quality on older GPUs.",
+                            info="Advanced: requires compatible GPU, PyTorch and Triton kernels. Disabled by default; kernel support is not installed by this launcher.",
                         )
                         dtype_sel = gr.Dropdown(
                             choices=list(DTYPE_MAP.keys()),
@@ -429,6 +425,8 @@ def main() -> None:
         )
 
     demo.queue(max_size=8).launch(
+        theme=gr.themes.Citrus(),
+        css=CSS,
         server_name="127.0.0.1",
         server_port=port,
         share=os.environ.get("GRADIO_SHARE", "0") == "1",

@@ -3,32 +3,21 @@ module.exports = {
     {
       method: "shell.run",
       params: {
-        message: "git pull"
+        message: "git pull --ff-only"
       }
     },
     {
+      when: "{{exists('app/.git')}}",
       method: "shell.run",
       params: {
         path: "app",
-        message: "git pull"
-      }
-    },
-    {
-      method: "shell.run",
-      params: {
-        venv: "env",
-        path: "app",
-        message: ["uv pip install -r ../requirements.txt"]
+        message: "git pull --ff-only"
       }
     },
     {
       method: "script.start",
       params: {
-        uri: "torch.js",
-        params: {
-          venv: "env",
-          path: "app"
-        }
+        uri: "install.js"
       }
     }
   ]
