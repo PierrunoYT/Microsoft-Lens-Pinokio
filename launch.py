@@ -3,20 +3,15 @@
 from __future__ import annotations
 
 import gc
+from functools import wraps
 import os
 import random
 import sys
-import time
+import threading
 
 import gradio as gr
 import torch
-from huggingface_hub import (
-    list_repo_files,
-    hf_hub_download,
-    snapshot_download,
-    try_to_load_from_cache,
-)
-from huggingface_hub import utils as hf_utils
+from huggingface_hub import snapshot_download
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.join(ROOT_DIR, "app")
@@ -48,7 +43,7 @@ DTYPE_MAP = {
 }
 
 MAX_SEED = 2**31 - 1
-_SKIP_PREFIXES = ("assets/", "README", ".git")
+_IGNORE_PATTERNS = ["assets/*", "README*", ".git*"]
 
 # ── Hardware detection ────────────────────────────────────────────────────────
 
@@ -88,49 +83,42 @@ _pipes: dict[str, LensPipeline] = {}
 _local_cache: dict[str, str] = {}
 _loaded_dtype: torch.dtype | None = None
 _loaded_mxfp4: bool | None = None
+_loaded_cpu_offload: bool | None = None
+_model_lock = threading.RLock()
+
+
+def _serialized(fn):
+    """Protect shared models, including calls outside Gradio's queue."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _model_lock:
+            return fn(*args, **kwargs)
+    return wrapped
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
 def _ensure_cached(repo: str) -> str:
     if repo in _local_cache:
         return _local_cache[repo]
-    hf_utils.disable_progress_bars()
-    try:
-        all_files = [
-            f for f in list_repo_files(repo_id=repo)
-            if not f.startswith(_SKIP_PREFIXES)
-        ]
-        to_download = [
-            f for f in all_files
-            if try_to_load_from_cache(repo_id=repo, filename=f) is None
-        ]
-        if to_download:
-            print(f"\nDownloading {len(to_download)} file(s) from {repo}:", flush=True)
-            for i, filename in enumerate(to_download, 1):
-                print(f"  [{i}/{len(to_download)}] {filename}", flush=True)
-                t0 = time.time()
-                local_file = hf_hub_download(repo_id=repo, filename=filename)
-                elapsed = time.time() - t0
-                size_mb = os.path.getsize(local_file) / (1024 ** 2)
-                print(f"         -> {size_mb:.0f} MB  {size_mb / elapsed:.1f} MB/s", flush=True)
-        else:
-            print(f"\n{repo} already cached.", flush=True)
-        _local_cache[repo] = snapshot_download(repo_id=repo, local_files_only=True)
-    finally:
-        hf_utils.enable_progress_bars()
+    # The Hub resolves a single revision and downloads every required file from
+    # that snapshot, avoiding partial/mixed snapshots when main changes.
+    _local_cache[repo] = snapshot_download(
+        repo_id=repo, ignore_patterns=_IGNORE_PATTERNS,
+    )
     return _local_cache[repo]
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
 def _unload_all() -> None:
-    global _text_encoder, _loaded_dtype, _loaded_mxfp4
+    global _text_encoder, _loaded_dtype, _loaded_mxfp4, _loaded_cpu_offload
     _text_encoder = None
     _loaded_dtype = None
     _loaded_mxfp4 = None
+    _loaded_cpu_offload = None
     _pipes.clear()
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    gc.collect()
     print("Model unloaded.", flush=True)
 
 
@@ -159,18 +147,20 @@ def _get_text_encoder(dtype: torch.dtype, use_mxfp4: bool) -> LensGptOssEncoder:
 
 
 def _get_pipe(model_name: str, dtype: torch.dtype, use_mxfp4: bool, cpu_offload: bool) -> LensPipeline:
+    global _loaded_cpu_offload
     repo = REPOS[model_name]
+
+    settings_changed = _loaded_dtype is not None and (
+        _loaded_dtype != dtype or _loaded_mxfp4 != use_mxfp4
+        or _loaded_cpu_offload != cpu_offload
+    )
+    if settings_changed or (_pipes and repo not in _pipes):
+        # Offload hooks belong to the pipeline. Never share an encoder with
+        # hooks from an old pipeline, or retain multiple large models on CUDA.
+        _unload_all()
 
     if repo in _pipes:
         return _pipes[repo]
-
-    # In CPU-offload mode keep only one pipeline in RAM at a time
-    if cpu_offload and _pipes:
-        for key in list(_pipes.keys()):
-            del _pipes[key]
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
 
     enc = _get_text_encoder(dtype, use_mxfp4)
     local_path = _ensure_cached(repo)
@@ -190,10 +180,12 @@ def _get_pipe(model_name: str, dtype: torch.dtype, use_mxfp4: bool, cpu_offload:
         pipe.to("cuda")
 
     _pipes[repo] = pipe
+    _loaded_cpu_offload = cpu_offload
     return pipe
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 
+@_serialized
 def generate(
     prompt: str,
     model_name: str,
@@ -218,16 +210,9 @@ def generate(
 
     dtype = DTYPE_MAP.get(dtype_label, torch.bfloat16)
 
-    # Reload text encoder if dtype or mxfp4 changed
-    if _loaded_dtype is not None and (_loaded_dtype != dtype or _loaded_mxfp4 != use_mxfp4):
-        _unload_all()
-
-    pipe = _get_pipe(model_name, dtype, use_mxfp4, cpu_offload)
-
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
     seed = int(seed)
-    generator = torch.Generator(device=pipe._execution_device).manual_seed(seed)
 
     call_kwargs: dict = dict(
         prompt=prompt.strip(),
@@ -236,10 +221,11 @@ def generate(
         num_inference_steps=int(steps),
         guidance_scale=float(cfg),
         num_images_per_prompt=int(num_images),
-        generator=generator,
     )
 
-    if enable_reasoner and reasoner_url.strip():
+    if enable_reasoner and not reasoner_url.strip():
+        raise gr.Error("Enter an API URL or disable the prompt reasoner.")
+    if enable_reasoner:
         call_kwargs["enable_reasoner"] = True
         call_kwargs["api_url"] = reasoner_url.strip()
         if reasoner_key.strip():
@@ -248,25 +234,30 @@ def generate(
             call_kwargs["api_model"] = reasoner_model_id.strip()
 
     try:
-        out = pipe(**call_kwargs)
+        pipe = _get_pipe(model_name, dtype, use_mxfp4, cpu_offload)
+        call_kwargs["generator"] = torch.Generator(device=pipe._execution_device).manual_seed(seed)
+        with torch.inference_mode():
+            out = pipe(**call_kwargs)
     except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        gc.collect()
+        _unload_all()
         raise gr.Error(
-            "CUDA out of memory. Try enabling CPU offload, reducing the number of images, "
-            "or switching to a lower-step model in the Hardware settings."
+            "CUDA out of memory while loading or generating. Enable CPU offload, "
+            "reduce the number of images, or lower the base resolution."
         )
     except Exception as exc:
+        _unload_all()
         raise gr.Error(f"Generation failed: {exc}") from exc
     return out.images, seed
 
 
+@_serialized
 def do_reload(model_name, dtype_label, use_mxfp4, cpu_offload):
     _unload_all()
     dtype = DTYPE_MAP.get(dtype_label, torch.bfloat16)
     try:
         _get_pipe(model_name, dtype, use_mxfp4, cpu_offload)
     except Exception as exc:
+        _unload_all()
         return gr.update(value=f"Reload failed: {exc}", visible=True)
     return gr.update(value="Model reloaded successfully.", visible=True)
 
@@ -361,12 +352,12 @@ def main() -> None:
                     with gr.Accordion("Hardware", open=False):
                         gr.Markdown(
                             f"**{GPU_NAME}** · {VRAM:.1f} GB VRAM  \n"
-                            "Changes here take effect after clicking **Reload model**."
+                            "Changes apply to the next generation, or click **Reload model** to apply now."
                         )
                         cpu_offload = gr.Checkbox(
                             value=_default_cpu_offload(),
                             label="CPU offload",
-                            info="Moves model layers to RAM between steps. Slower but fits any VRAM.",
+                            info="Moves model layers to RAM between steps. Requires enough system RAM and VRAM for each active component.",
                         )
                         use_mxfp4 = gr.Checkbox(
                             value=_default_mxfp4(),
@@ -423,13 +414,18 @@ def main() -> None:
         ]
         gen_outputs = [gallery, used_seed]
 
-        run_btn.click(generate, inputs=gen_inputs, outputs=gen_outputs)
-        prompt.submit(generate, inputs=gen_inputs, outputs=gen_outputs)
+        run_btn.click(generate, inputs=gen_inputs, outputs=gen_outputs,
+                      concurrency_id="model", concurrency_limit=1, api_name="generate")
+        prompt.submit(generate, inputs=gen_inputs, outputs=gen_outputs,
+                      concurrency_id="model", concurrency_limit=1, api_name=False)
 
         reload_btn.click(
             do_reload,
             inputs=[model, dtype_sel, use_mxfp4, cpu_offload],
             outputs=reload_status,
+            concurrency_id="model",
+            concurrency_limit=1,
+            api_name="reload_model",
         )
 
     demo.queue(max_size=8).launch(

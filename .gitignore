@@ -2,3 +2,7 @@ app
 node_modules
 .DS_Store
 logs
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
