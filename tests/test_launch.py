@@ -137,6 +137,21 @@ class LauncherTests(unittest.TestCase):
                 self.generate(enable_reasoner=True)
         load.assert_not_called()
 
+    def test_null_api_inputs_are_accepted(self):
+        pipe = Mock(return_value=SimpleNamespace(images=["image"]))
+        pipe._execution_device = "cuda"
+        with patch.object(self.app, "_get_pipe", return_value=pipe):
+            images, seed = self.generate(seed=None, reasoner_url=None,
+                                         reasoner_key=None, reasoner_model_id=None)
+        self.assertEqual(images, ["image"])
+        self.assertIsInstance(seed, int)
+
+    def test_unknown_model_rejected_before_loading(self):
+        with patch.object(self.app, "_get_pipe") as load:
+            with self.assertRaisesRegex(self.app.gr.Error, "Unknown model"):
+                self.generate(model_name="missing")
+        load.assert_not_called()
+
     def test_reload_waits_for_generation_lock(self):
         started, finished = threading.Event(), threading.Event()
         def reload():

@@ -204,9 +204,15 @@ def generate(
     if not prompt or not prompt.strip():
         raise gr.Error("Please enter a prompt.")
 
+    if model_name not in REPOS:
+        raise gr.Error(f"Unknown model: {model_name!r}.")
     dtype = DTYPE_MAP.get(dtype_label, torch.bfloat16)
+    # API clients may send null for optional text fields.
+    reasoner_url, reasoner_key, reasoner_model_id = (
+        (value or "") for value in (reasoner_url, reasoner_key, reasoner_model_id)
+    )
 
-    if randomize_seed:
+    if randomize_seed or seed is None:
         seed = random.randint(0, MAX_SEED)
     seed = int(seed)
 
