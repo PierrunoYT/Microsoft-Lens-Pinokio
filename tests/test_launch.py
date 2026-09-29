@@ -104,6 +104,15 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(self.app._pipes)
         self.assertIsNone(self.app._text_encoder)
 
+    def test_inference_error_keeps_loaded_pipeline(self):
+        pipe = self.populate()
+        pipe.side_effect = RuntimeError("reasoner unavailable")
+        pipe._execution_device = "cuda"
+        with self.assertRaisesRegex(self.app.gr.Error, "Generation failed"):
+            self.generate()
+        self.assertIs(self.app._pipes[self.app.REPOS[self.first]], pipe)
+        self.assertIsNotNone(self.app._text_encoder)
+
     def test_reload_failure_clears_partial_encoder(self):
         def fail(*args):
             self.app._text_encoder = Mock()

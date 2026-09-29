@@ -231,17 +231,32 @@ def generate(
 
     try:
         pipe = _get_pipe(model_name, dtype, use_mxfp4, cpu_offload)
+    except torch.cuda.OutOfMemoryError:
+        _unload_all()
+        raise gr.Error(
+            "CUDA out of memory while loading the model. Enable CPU offload "
+            "or choose a smaller precision."
+        )
+    except Exception as exc:
+        _unload_all()
+        raise gr.Error(f"Model loading failed: {exc}") from exc
+
+    try:
         call_kwargs["generator"] = torch.Generator(device=pipe._execution_device).manual_seed(seed)
         with torch.inference_mode():
             out = pipe(**call_kwargs)
     except torch.cuda.OutOfMemoryError:
         _unload_all()
         raise gr.Error(
-            "CUDA out of memory while loading or generating. Enable CPU offload, "
+            "CUDA out of memory while generating. Enable CPU offload, "
             "reduce the number of images, or lower the base resolution."
         )
     except Exception as exc:
-        _unload_all()
+        # The loaded pipeline is still valid (e.g. a reasoner API error), so
+        # keep it rather than forcing a full reload on the next request.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         raise gr.Error(f"Generation failed: {exc}") from exc
     return out.images, seed
 
